@@ -1,0 +1,20 @@
+               100 store                
+                 lahore                 
+           Phone: 3456789988            
+----------------------------------------
+               BILL NO: 1               
+Date: 24-10-2026 13:51
+Cashier: admin
+Payment: Card
+----------------------------------------
+super
+   11 x 50.00                     550.00
+----------------------------------------
+Subtotal                          550.00
+Discount                            0.00
+Tax                                44.00
+TOTAL                             594.00
+Diye gaye                        1000.00
+Wapis diye                        406.00
+----------------------------------------
+    Shukriya! Dobara tashreef layein    
