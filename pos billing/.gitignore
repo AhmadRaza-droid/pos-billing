@@ -1,0 +1,7 @@
+superstore.db
+backups/
+*.db-journal
+__pycache__/
+build/
+dist/
+*.exe
