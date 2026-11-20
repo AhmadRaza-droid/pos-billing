@@ -1,0 +1,10 @@
+superstore.db
+backups/
+receipts/
+*.db-journal
+__pycache__/
+*.py[cod]
+build/
+dist/
+installer_output/
+*.exe
