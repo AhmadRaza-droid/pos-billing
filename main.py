@@ -13,7 +13,8 @@ import i18n
 import labels as lbl
 import Receipt as rcpt
 from i18n import _ as tr, raw, messagebox, simpledialog
-from version import APP_NAME, APP_VERSION
+APP_NAME = "POS Billing"
+APP_VERSION = "1.0.0"
 
 
 PRIMARY = "#2563eb"      # nila
