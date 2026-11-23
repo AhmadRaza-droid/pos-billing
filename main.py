@@ -4,6 +4,7 @@ import sys
 import csv
 import copy
 import time
+import importlib
 import tkinter as tk
 from tkinter import ttk, filedialog
 from datetime import datetime, timedelta
@@ -11,10 +12,15 @@ from datetime import datetime, timedelta
 import db
 import i18n
 import labels as lbl
-import Receipt as rcpt
+rcpt = importlib.import_module("receipt")
 from i18n import _ as tr, raw, messagebox, simpledialog
-APP_NAME = "POS Billing"
-APP_VERSION = "1.0.0"
+try:
+    _version = importlib.import_module("version")
+    APP_NAME = _version.APP_NAME
+    APP_VERSION = _version.APP_VERSION
+except (ImportError, AttributeError):
+    APP_NAME = "POS Billing"
+    APP_VERSION = "1.0.0"
 
 
 PRIMARY = "#2563eb"      # nila
@@ -144,13 +150,26 @@ class App(tk.Tk):
         db.log_action(u["id"] if u else None, u["username"] if u else "-", action, details)
 
     def is_admin(self):
+        """Super Admin (malik). Sirf wohi users aur sab kuch sambhal sakta hai."""
         return bool(self.user) and self.user["role"] == "admin"
 
+    def can(self, key):
+        """Kya mojooda user ko ye ijazat hai? (taza ijazaten database se, taake badalne par fauran asar ho)"""
+        if not self.user:
+            return False
+        return key in db.get_perms(db.get_user(self.user["id"]) or self.user)
+
     def can_return(self):
-        return self.is_admin() or bool(self.user["can_return"])
+        return self.can("returns")
 
     def can_discount(self):
-        return self.is_admin() or bool(self.user["can_discount"])
+        return self.can("discounts")
+
+    def allowed(self, key, parent=None):
+        if self.can(key):
+            return True
+        messagebox.showwarning("Permission", "You do not have permission for this", parent=parent)
+        return False
 
     def logo_image(self, max_w, max_h):
         """Dukaan ka logo (Settings mein chuna hua) chhota kar ke deta hai. Na ho to None."""
@@ -304,7 +323,7 @@ class App(tk.Tk):
         self.clear()
         self.unbind("<Return>")
         f, r = self.card("Welcome!", "Set up your shop")
-        fields = [("s_shop", "Shop name", "My Superstore", False), ("s_user", "Admin username", "admin", False),
+        fields = [("s_shop", "Shop name", "My Superstore", False), ("s_user", "Super Admin username", "admin", False),
                   ("s_pw", "Password (at least 6 characters)", "", True), ("s_pw2", "Confirm password", "", True),
                   ("s_rec", "Recovery code (optional)", "", True)]
         for i, (attr, label, default, secret) in enumerate(fields):
@@ -397,7 +416,7 @@ class App(tk.Tk):
             self.apply_language(code)
             self.audit("login")
             self.show_billing()
-            if row['role'] == 'admin':
+            if self.can("inventory") or self.can("dashboard"):
                 self.after(400, lambda: self.show_alerts(True))
         else:
             self._fail_count += 1
@@ -434,7 +453,7 @@ class App(tk.Tk):
         self.make_lang_combo(top, self.switch_language).pack(side="right", padx=4)
         self.lbl_clock = tk.Label(top, bg=PRIMARY_DARK, fg="white", font=("Segoe UI", 11, "bold"))
         self.lbl_clock.pack(side="right", padx=14)
-        tk.Label(top, text=tr("Cashier: {name} - {role}", name=self.user['username'], role=self.user['role']),
+        tk.Label(top, text=tr("User: {name} - {role}", name=self.user['username'], role=tr(db.ROLE_LABELS.get(self.user['role'], self.user['role']))),
                  bg=PRIMARY_DARK, fg="#bfdbfe", font=("Segoe UI", 10)).pack(side="right", padx=8)
         self.tick_clock()
 
@@ -442,17 +461,23 @@ class App(tk.Tk):
         menu = tk.Frame(self, bg="#e0e7ff")
         menu.pack(fill="x")
         buttons = [("Bills", self.open_bills)]
-        if self.can_return():
+        if self.can("returns"):
             buttons.append(("Returns", self.open_returns))
         buttons.append(("Customers", self.open_customers))
-        if self.user["role"] == "admin":
+        if self.can("dashboard"):
             buttons.insert(0, ("Dashboard", self.open_dashboard))
+        buttons += [(t, c) for t, c, k in (("Inventory", self.open_inventory, "inventory"),
+                                           ("Stock In", self.open_purchase, "purchases"),
+                                           ("Suppliers", self.open_suppliers, "suppliers"),
+                                           ("Reports", self.open_reports, "reports"),
+                                           ("Closing", self.open_closing, "closing")) if self.can(k)]
+        if self.can("inventory") or self.can("dashboard"):
             low = len(db.low_stock_products()) + len(db.expiring_products(30))
-            buttons += [("Inventory", self.open_inventory), ("Stock In", self.open_purchase),
-                        ("Suppliers", self.open_suppliers), ("Reports", self.open_reports),
-                        ("Closing", self.open_closing),
-                        (tr("Alerts ({n})", n=low), self.show_alerts), ("Backup", self.open_backup),
-                        ("Audit Log", self.open_audit), ("Users", self.open_users), ("Settings", self.open_settings)]
+            buttons.append((tr("Alerts ({n})", n=low), self.show_alerts))
+        buttons += [(t, c) for t, c, k in (("Backup", self.open_backup, "backup"),
+                                           ("Audit Log", self.open_audit, "audit"),
+                                           ("Users", self.open_users, "users"),
+                                           ("Settings", self.open_settings, "settings")) if self.can(k)]
         for text, cmd in buttons:
             tk.Button(menu, text=text, command=cmd).pack(side="left", padx=3, pady=4)
 
@@ -1362,10 +1387,15 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ USERS
     def open_users(self):
+        if not self.allowed("users"):
+            return
         win = tk.Toplevel(self)
         win.title("Users")
-        win.geometry("720x500")
+        win.geometry("760x520")
         self.autosize(win)
+        sup = self.is_admin()
+        # Super Admin: Admin (limited) aur Cashier bana sakta hai. Admin (limited): sirf Cashier.
+        role_opts = [("manager", "Admin"), ("cashier", "Cashier")] if sup else [("cashier", "Cashier")]
 
         form = tk.LabelFrame(win, text="New user", padx=8, pady=8)
         form.pack(fill="x", padx=10, pady=10)
@@ -1374,18 +1404,16 @@ class App(tk.Tk):
         tk.Label(form, text="Role").grid(row=0, column=2, padx=4)
         e_name = tk.Entry(form, width=14)
         e_pass = tk.Entry(form, width=14, show="*")
-        cb_role = ttk.Combobox(form, values=("cashier", "admin"), width=9, state="readonly")
-        cb_role.set("cashier")
+        cb_role = ttk.Combobox(form, values=[tr(label) for _c, label in role_opts], width=10, state="readonly")
+        cb_role.current(len(role_opts) - 1)
         e_name.grid(row=1, column=0, padx=4)
         e_pass.grid(row=1, column=1, padx=4)
         cb_role.grid(row=1, column=2, padx=4)
-        var_ret, var_disc = tk.IntVar(value=1), tk.IntVar(value=1)
-        tk.Checkbutton(form, text="Can do returns", variable=var_ret).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        tk.Checkbutton(form, text="Can give discounts", variable=var_disc).grid(row=2, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        tk.Label(form, text="A new account starts with the standard permissions for its role. Use 'Permissions' to change them.",
+                 fg="#64748b", font=("Segoe UI", 9)).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-        tree = ttk.Treeview(win, columns=("name", "role", "returns", "discount"), show="headings", height=6)
-        for c, t, w, a in (("name", "Username", 200, "w"), ("role", "Role", 110, "w"),
-                           ("returns", "Returns", 110, "center"), ("discount", "Discounts", 110, "center")):
+        tree = ttk.Treeview(win, columns=("name", "role", "perms"), show="headings", height=7)
+        for c, t, w, a in (("name", "Username", 220, "w"), ("role", "Role", 150, "w"), ("perms", "Permissions", 150, "center")):
             tree.heading(c, text=t)
             tree.column(c, width=w, anchor=a)
         tree.pack(fill="both", expand=True, padx=10)
@@ -1393,11 +1421,12 @@ class App(tk.Tk):
         def load():
             tree.delete(*tree.get_children())
             conn = db.get_connection()
-            for r in conn.execute("SELECT * FROM users ORDER BY username"):
-                adm = r["role"] == "admin"
+            sql = "SELECT * FROM users" + ("" if sup else " WHERE role = 'cashier'") + " ORDER BY role, username"
+            for r in conn.execute(sql):
+                perms = db.get_perms(r)
                 tree.insert("", "end", iid=str(r["id"]), values=(
-                    r["username"], r["role"], tr("Yes") if adm or r["can_return"] else tr("No"),
-                    tr("Yes") if adm or r["can_discount"] else tr("No")))
+                    r["username"], tr(db.ROLE_LABELS.get(r["role"], r["role"])),
+                    tr("All") if r["role"] == "admin" else f"{len(perms)} / {len(db.PERM_KEYS)}"))
             conn.close()
 
         def add():
@@ -1405,16 +1434,15 @@ class App(tk.Tk):
             if not name or len(pw) < 4:
                 messagebox.showwarning("User", "Enter a username and a password of at least 4 characters", parent=win)
                 return
+            role = role_opts[cb_role.current()][0]
+            if role == "manager" and not sup:
+                return
             try:
-                conn = db.get_connection()
-                conn.execute("INSERT INTO users (username, password_hash, role, can_return, can_discount) VALUES (?, ?, ?, ?, ?)",
-                             (name, db.hash_password(pw), cb_role.get(), var_ret.get(), var_disc.get()))
-                conn.commit()
-                conn.close()
+                db.create_user(name, pw, role)
             except Exception:
                 messagebox.showerror("User", "This username already exists", parent=win)
                 return
-            self.audit("user_added", f"{name} ({cb_role.get()})")
+            self.audit("user_added", f"{name} ({role})")
             e_name.delete(0, "end")
             e_pass.delete(0, "end")
             load()
@@ -1424,51 +1452,78 @@ class App(tk.Tk):
             if not sel:
                 messagebox.showinfo("User", "Select a user from the list first", parent=win)
                 return None
-            return int(sel[0])
+            row = db.get_user(int(sel[0]))
+            if row is None:
+                return None
+            if not sup and row["role"] != "cashier":      # Admin (limited) sirf cashiers ko sambhal sakta hai
+                messagebox.showwarning("User", "This account can only be changed by the Super Admin", parent=win)
+                return None
+            return row
 
         def change_password():
-            uid = selected_user()
-            if uid is None:
+            row = selected_user()
+            if row is None:
                 return
             pw = simpledialog.askstring("Password", "New password:", show="*", parent=win)
             if pw and len(pw) >= 4:
                 conn = db.get_connection()
-                conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (db.hash_password(pw), uid))
+                conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (db.hash_password(pw), row["id"]))
                 conn.commit()
                 conn.close()
-                self.audit("password_changed", str(tree.item(str(uid))["values"][0]))
+                self.audit("password_changed", row["username"])
                 messagebox.showinfo("Password", "Password changed", parent=win)
             elif pw:
                 messagebox.showwarning("Password", "Use at least 4 characters", parent=win)
 
-        def toggle(field):
-            uid = selected_user()
-            if uid is None:
+        def edit_perms():
+            row = selected_user()
+            if row is None:
                 return
-            conn = db.get_connection()
-            row = conn.execute("SELECT username, can_return, can_discount FROM users WHERE id = ?", (uid,)).fetchone()
-            conn.close()
-            new = 0 if row[field] else 1
-            db.set_user_permissions(uid, **{field: bool(new)})
-            self.audit("permission_changed", f"{row['username']}: {field} = {new}")
-            load()
-            tree.selection_set(str(uid))
+            if row["role"] == "admin":
+                messagebox.showinfo("Permissions", "The Super Admin always has every permission", parent=win)
+                return
+            # Super Admin sab ijazaten de sakta hai; Admin (limited) sirf Returns / Discounts
+            grantable = [k for k, _l in db.PERMISSIONS] if sup else list(db.MANAGER_GRANTABLE)
+            current = db.get_perms(row)
+            dlg = tk.Toplevel(win)
+            dlg.title(tr("Permissions for {name}", name=row["username"]))
+            dlg.transient(win)
+            tk.Label(dlg, text=tr("Permissions for {name}", name=row["username"]), font=("Segoe UI", 12, "bold")).pack(
+                anchor="w", padx=16, pady=(14, 6))
+            vars_ = {}
+            for k, label in db.PERMISSIONS:
+                if k in grantable:
+                    vars_[k] = tk.IntVar(value=1 if k in current else 0)
+                    tk.Checkbutton(dlg, text=label, variable=vars_[k], font=("Segoe UI", 11)).pack(anchor="w", padx=22)
+
+            def save_perms():
+                new = [k for k in current if k not in grantable] + [k for k, v in vars_.items() if v.get()]
+                db.set_perms(row["id"], new)
+                self.audit("permissions_changed", f"{row['username']}: {','.join(k for k in db.PERM_KEYS if k in new)}")
+                dlg.destroy()
+                load()
+                tree.selection_set(str(row["id"]))
+            bb = tk.Frame(dlg)
+            bb.pack(fill="x", padx=16, pady=14)
+            tk.Button(bb, text="Save", bg=ACCENT, activebackground="#15803d", command=save_perms).pack(side="left")
+            tk.Button(bb, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
+            self.autosize(dlg)
+            dlg.grab_set()
 
         def delete():
-            uid = selected_user()
-            if uid is None:
+            row = selected_user()
+            if row is None:
                 return
-            if uid == self.user["id"]:
+            if row["id"] == self.user["id"]:
                 messagebox.showwarning("User", "You cannot delete your own login", parent=win)
                 return
             if messagebox.askyesno("Delete", "Delete this user?", parent=win):
                 try:
-                    name = tree.item(str(uid))["values"][0]
                     conn = db.get_connection()
-                    conn.execute("DELETE FROM users WHERE id = ?", (uid,))
+                    conn.execute("DELETE FROM users WHERE id = ?", (row["id"],))
                     conn.commit()
                     conn.close()
-                    self.audit("user_deleted", str(name))
+                    self.audit("user_deleted", row["username"])
                 except Exception:
                     messagebox.showerror("User", "This user has bills, so it cannot be deleted", parent=win)
                 load()
@@ -1476,16 +1531,18 @@ class App(tk.Tk):
         tk.Button(form, text="Add User", bg="#16a34a", fg="white", command=add).grid(row=1, column=3, padx=10)
         bf = tk.Frame(win)
         bf.pack(fill="x", padx=10, pady=10, side="bottom", before=tree)
+        tk.Button(bf, text="Permissions", bg=PRIMARY, command=edit_perms).pack(side="left")
         tk.Button(bf, text="Change password", bg=ACCENT, activebackground="#15803d",
-                  font=("Segoe UI", 10, "bold"), command=change_password).pack(side="left")
-        tk.Button(bf, text="Returns on/off", command=lambda: toggle("can_return")).pack(side="left", padx=6)
-        tk.Button(bf, text="Discounts on/off", command=lambda: toggle("can_discount")).pack(side="left")
-        tk.Button(bf, text="Delete", bg=DANGER, activebackground="#b91c1c", command=delete).pack(side="left", padx=8)
-        tk.Label(bf, text="Admins can always do everything.", fg="#64748b").pack(side="left", padx=10)
+                  font=("Segoe UI", 10, "bold"), command=change_password).pack(side="left", padx=6)
+        tk.Button(bf, text="Delete", bg=DANGER, activebackground="#b91c1c", command=delete).pack(side="left")
+        tk.Label(bf, text=("The Super Admin can always do everything." if sup
+                           else "You can manage cashier accounts only."), fg="#64748b").pack(side="left", padx=10)
         load()
 
     # --------------------------------------------------------- SETTINGS
     def open_settings(self):
+        if not self.allowed("settings"):
+            return
         win = tk.Toplevel(self)
         win.title("Shop Settings")
         win.geometry("620x640")
@@ -1585,18 +1642,20 @@ class App(tk.Tk):
         cb_rlang.current(rl_codes.index(s["receipt_language"]) if s["receipt_language"] in rl_codes else 1)
         cb_rlang.grid(row=r, column=1, sticky="w", padx=6)
         r += 1
-        tk.Label(win, text="Recovery code\n(if you forget the password)", font=("Segoe UI", 11)).grid(
-            row=r, column=0, sticky="e", padx=10, pady=7)
-        e_rec = tk.Entry(win, width=34, font=("Segoe UI", 11), show="*")
-        e_rec.grid(row=r, column=1, padx=6)
-        r += 1
-        tk.Label(win, text=("It is set. To change it, type a new code; otherwise leave it empty."
-                            if db.has_recovery_code() else "Not set yet. Type a code you can remember."),
-                 fg="#64748b", font=("Segoe UI", 9)).grid(row=r, column=1, sticky="w", padx=6)
-        r += 1
+        e_rec = None
+        if self.is_admin():            # recovery code sirf Super Admin dekh / badal sakta hai
+            tk.Label(win, text="Recovery code\n(if you forget the password)", font=("Segoe UI", 11)).grid(
+                row=r, column=0, sticky="e", padx=10, pady=7)
+            e_rec = tk.Entry(win, width=34, font=("Segoe UI", 11), show="*")
+            e_rec.grid(row=r, column=1, padx=6)
+            r += 1
+            tk.Label(win, text=("It is set. To change it, type a new code; otherwise leave it empty."
+                                if db.has_recovery_code() else "Not set yet. Type a code you can remember."),
+                     fg="#64748b", font=("Segoe UI", 9)).grid(row=r, column=1, sticky="w", padx=6)
+            r += 1
 
         def save():
-            rec = e_rec.get().strip()
+            rec = e_rec.get().strip() if e_rec else ""
             if rec and len(rec) < 4:
                 messagebox.showwarning("Recovery", "Use a recovery code of at least 4 characters", parent=win)
                 return
@@ -1627,6 +1686,8 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ AUDIT LOG
     def open_audit(self):
+        if not self.allowed("audit"):
+            return
         win = tk.Toplevel(self)
         win.title("Audit Log")
         win.geometry("980x560")
@@ -1696,6 +1757,8 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ DASHBOARD
     def open_dashboard(self):
+        if not self.allowed("dashboard"):
+            return
         win = tk.Toplevel(self)
         win.title("Dashboard")
         win.geometry("1060x720")
@@ -1794,6 +1857,8 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------- REPORTS
     def open_reports(self):
+        if not self.allowed("reports"):
+            return
         win = tk.Toplevel(self)
         win.title("Sales Reports")
         win.geometry("980x580")
@@ -1956,6 +2021,8 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- SUPPLIERS
     def open_suppliers(self):
+        if not self.allowed("suppliers"):
+            return
         win = tk.Toplevel(self)
         win.title("Suppliers")
         win.geometry("640x520")
@@ -2058,6 +2125,8 @@ class App(tk.Tk):
         return result.get("v")
 
     def open_purchase(self):
+        if not self.allowed("purchases"):
+            return
         win = tk.Toplevel(self)
         win.title("Stock In (Purchase)")
         win.geometry("900x620")
@@ -2182,6 +2251,8 @@ class App(tk.Tk):
 
     # ----------------------------------------------------------- CLOSING
     def open_closing(self):
+        if not self.allowed("closing"):
+            return
         win = tk.Toplevel(self)
         win.title("Daily Closing")
         win.geometry("560x600")
@@ -2272,6 +2343,8 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ BACKUP
     def open_backup(self):
+        if not self.allowed("backup"):
+            return
         win = tk.Toplevel(self)
         win.title("Backup")
         win.geometry("480x300")
@@ -2319,10 +2392,15 @@ class App(tk.Tk):
 
         tk.Button(win, text="Create a backup (USB / folder)", width=34, bg="#16a34a", fg="white",
                   command=backup).pack(pady=6)
-        tk.Button(win, text="Restore data from a backup", width=34, command=restore).pack(pady=6)
+        if self.is_admin():            # restore sirf Super Admin kar sakta hai
+            tk.Button(win, text="Restore data from a backup", width=34, command=restore).pack(pady=6)
+        else:
+            tk.Label(win, text="Only the Super Admin can restore a backup", fg="#64748b").pack(pady=6)
 
     # -------------------------------------------------------- INVENTORY
     def open_inventory(self):
+        if not self.allowed("inventory"):
+            return
         win = tk.Toplevel(self)
         win.title("Inventory")
         win.geometry("1100x620")
@@ -2497,10 +2575,12 @@ class App(tk.Tk):
 
         bf = tk.Frame(win)
         bf.pack(fill="x", padx=10, pady=8)
-        for text, cmd in (("Restock", restock), ("Change price", change_price),
-                          ("Change expiry", change_expiry), ("Print barcode labels", print_labels),
-                          ("Import products (Excel/CSV)", import_file), ("Import template", make_template),
-                          ("Delete", delete)):
+        for text, cmd, perm in (("Restock", restock, None), ("Change price", change_price, "prices"),
+                                ("Change expiry", change_expiry, None), ("Print barcode labels", print_labels, None),
+                                ("Import products (Excel/CSV)", import_file, None), ("Import template", make_template, None),
+                                ("Delete", delete, "delete_products")):
+            if perm and not self.can(perm):
+                continue
             tk.Button(bf, text=text, command=cmd).pack(side="left", padx=4)
         tk.Label(win, text="Red = low stock   |   Orange = expiry near / passed",
                  fg="#dc2626").pack(pady=(0, 8))

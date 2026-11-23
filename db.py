@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import csv
 import shutil
@@ -153,7 +154,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('admin', 'cashier'))
+        role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'cashier'))
     )""")
 
     cur.execute("""
@@ -295,6 +296,7 @@ def init_db():
     _add_column(cur, "users", "language TEXT")
     _add_column(cur, "users", "can_return INTEGER NOT NULL DEFAULT 1")
     _add_column(cur, "users", "can_discount INTEGER NOT NULL DEFAULT 1")
+    _add_column(cur, "users", "perms TEXT")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,13 +313,128 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _migrate_user_roles()
+    _backfill_perms()
+
+
+# ---------- Roles aur ijazaten (Super Admin / Admin / Cashier) ----------
+# Database mein 'admin' = Super Admin (malik, sab kuch kar sakta hai),
+# 'manager' = Admin (limited, Super Admin jo ijazat de), 'cashier' = Cashier.
+ROLE_LABELS = {"admin": "Super Admin", "manager": "Admin", "cashier": "Cashier"}
+PERMISSIONS = [
+    ("dashboard", "View the dashboard"),
+    ("reports", "View sales reports"),
+    ("closing", "Daily closing"),
+    ("inventory", "Manage products and stock"),
+    ("prices", "Change prices"),
+    ("delete_products", "Delete products"),
+    ("purchases", "Stock In (purchases)"),
+    ("suppliers", "Suppliers"),
+    ("returns", "Process returns"),
+    ("discounts", "Give discounts"),
+    ("backup", "Create backups"),
+    ("audit", "View the audit log"),
+    ("users", "Manage cashier accounts"),
+    ("settings", "Change shop settings"),
+]
+PERM_KEYS = [k for k, _ in PERMISSIONS]
+DEFAULT_PERMS = {
+    "cashier": ["returns", "discounts"],
+    "manager": ["dashboard", "reports", "closing", "inventory", "prices", "purchases", "suppliers",
+                "returns", "discounts"],
+}
+MANAGER_GRANTABLE = ("returns", "discounts")   # jo ek Admin (manager) apne cashier ko de sakta hai
+
+
+def _migrate_user_roles():
+    """Purani users table mein 'manager' role ki ijazat nahi thi: table naye sire se banata hai (data wahi rehta hai)."""
+    conn = sqlite3.connect(DB_NAME, isolation_level=None)
+    try:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+        if not row or "'manager'" in row[0]:
+            return
+        new_sql = re.sub(r"role\s+IN\s*\([^)]*\)", "role IN ('admin', 'manager', 'cashier')", row[0], count=1)
+        new_sql = re.sub(r'CREATE TABLE\s+"?users"?', "CREATE TABLE users_new", new_sql, count=1)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("BEGIN")
+        try:
+            conn.execute(new_sql)
+            conn.execute("INSERT INTO users_new SELECT * FROM users")
+            conn.execute("DROP TABLE users")
+            conn.execute("ALTER TABLE users_new RENAME TO users")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.close()
+
+
+def _backfill_perms():
+    """Jin users ki ijazaten abhi tak likhi nahi gayi (purane users) unhein purani settings ke hisab se bharta hai."""
+    conn = get_connection()
+    for r in conn.execute("SELECT id, role, can_return, can_discount FROM users WHERE perms IS NULL").fetchall():
+        if r["role"] == "admin":
+            perms = ""
+        elif r["role"] == "manager":
+            perms = ",".join(DEFAULT_PERMS["manager"])
+        else:
+            perms = ",".join(k for k, on in (("returns", r["can_return"]), ("discounts", r["can_discount"])) if on)
+        conn.execute("UPDATE users SET perms = ? WHERE id = ?", (perms, r["id"]))
+    conn.commit()
+    conn.close()
+
+
+def get_user(user_id):
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row
+
+
+def get_perms(user):
+    """User ki ijazaten (set). Super Admin ke paas hamesha sab hoti hain."""
+    if user is None:
+        return set()
+    if user["role"] == "admin":
+        return set(PERM_KEYS)
+    keys = user.keys()
+    raw_perms = user["perms"] if "perms" in keys else None
+    if raw_perms is None:        # abhi likhi nahi gayi: purani settings / role ke default se
+        if user["role"] == "manager":
+            return set(DEFAULT_PERMS["manager"])
+        return {k for k, col in (("returns", "can_return"), ("discounts", "can_discount"))
+                if col not in keys or user[col]}
+    return {p for p in raw_perms.split(",") if p in PERM_KEYS}
+
+
+def set_perms(user_id, perms):
+    conn = get_connection()
+    conn.execute("UPDATE users SET perms = ? WHERE id = ?",
+                 (",".join(k for k in PERM_KEYS if k in set(perms)), user_id))
+    conn.commit()
+    conn.close()
+
+
+def create_user(username, password, role, perms=None):
+    if role not in ("manager", "cashier"):
+        raise ValueError("role")
+    perms = DEFAULT_PERMS[role] if perms is None else perms
+    conn = get_connection()
+    cur = conn.execute("INSERT INTO users (username, password_hash, role, perms) VALUES (?, ?, ?, ?)",
+                       (username, hash_password(password), role, ",".join(perms)))
+    conn.commit()
+    uid = cur.lastrowid
+    conn.close()
+    return uid
 
 
 def create_admin(username, password):
     """Setup screen se pehla admin account banata hai."""
     global NEEDS_SETUP
     conn = get_connection()
-    conn.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
+    conn.execute("INSERT INTO users (username, password_hash, role, perms) VALUES (?, ?, 'admin', '')",
                  (username, hash_password(password)))
     conn.commit()
     conn.close()
