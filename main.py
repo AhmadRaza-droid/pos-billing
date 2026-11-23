@@ -4,7 +4,6 @@ import sys
 import csv
 import copy
 import time
-import importlib
 import tkinter as tk
 from tkinter import ttk, filedialog
 from datetime import datetime, timedelta
@@ -12,15 +11,9 @@ from datetime import datetime, timedelta
 import db
 import i18n
 import labels as lbl
-rcpt = importlib.import_module("receipt")
+import receipt as rcpt
 from i18n import _ as tr, raw, messagebox, simpledialog
-try:
-    _version = importlib.import_module("version")
-    APP_NAME = _version.APP_NAME
-    APP_VERSION = _version.APP_VERSION
-except (ImportError, AttributeError):
-    APP_NAME = "POS Billing"
-    APP_VERSION = "1.0.0"
+from version import APP_NAME, APP_VERSION
 
 
 PRIMARY = "#2563eb"      # nila
